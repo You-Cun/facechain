@@ -68,6 +68,7 @@ def img_pad(pil_file, fixed_height=512, fixed_width=512):
 
 
 def txt2img_multi(pipe,
+                  face_adapter,
                   face_image,
                   images,
                   pos_prompt,
@@ -75,11 +76,14 @@ def txt2img_multi(pipe,
                   num_images=10,
                   pose_control_weight=1.0,
                   depth_control_weight=0.5,
-                  cfg_scale=7):
+                  cfg_scale=7,
+                  scale=0.5):
     batch_size = 1
     images_out = []
     for i in range(int(num_images / batch_size)):
-        images_style = pipe.generate(
+        images_style = face_adapter.generate(
+            sd_pipe=pipe,
+            scale=scale,
             prompt=pos_prompt,
             face_image=face_image,
             image=images,
@@ -136,7 +140,9 @@ def main_diffusion_inference_multi(num_gen_images,
                                    controlnet=None,
                                    depth_estimator=None,
                                    pipe=None,
-                                   cfg_scale=7):
+                                   face_adapter=None,
+                                   cfg_scale=7,
+                                   scale=0.5):
 
     add_prompt_style = ''
 
@@ -159,6 +165,7 @@ def main_diffusion_inference_multi(num_gen_images,
 
     images_style = txt2img_multi(
             pipe,
+            face_adapter,
             input_img,
             control_im,
             add_prompt_style + pos_prompt,
@@ -166,7 +173,8 @@ def main_diffusion_inference_multi(num_gen_images,
             num_images=num_gen_images,
             pose_control_weight=pose_control_weight,
             depth_control_weight=depth_control_weight,
-            cfg_scale=cfg_scale)
+            cfg_scale=cfg_scale,
+            scale=scale)
 
     return images_style, False
 
@@ -195,7 +203,9 @@ def main_model_inference(num_gen_images,
                          controlnet=None,
                          depth_estimator=None,
                          pipe=None,
-                         cfg_scale=7):
+                         face_adapter=None,
+                         cfg_scale=7,
+                         scale=0.5):
     if use_main_model:
         if pose_image is None:
             pass
@@ -211,7 +221,7 @@ def main_model_inference(num_gen_images,
                     pose_control_weight, depth_control_weight, pose_image,
                     use_face_pose, pos_prompt, neg_prompt, input_img,
                     segmentation_pipeline, image_face_fusion, openpose,
-                    controlnet, depth_estimator, pipe, cfg_scale)
+                    controlnet, depth_estimator, pipe, face_adapter, cfg_scale, scale)
             else:
                 pass
 
@@ -277,90 +287,18 @@ def post_process_fn(use_post_process, swap_results_ori, selected_face,
 
 class GenPortrait:
 
-    def __init__(self):
+    def __init__(self, segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, face_adapter):
         dtype = torch.float16
-        
-        pose_model_id = 'damo/face_chain_control_model'
-        pose_revision = 'v1.0.1'
-        pose_file = 'model_controlnet/control_v11p_sd15_openpose'
-        pose_model_path = os.path.join(
-            snapshot_download(pose_model_id, revision=pose_revision),
-            pose_file)
-        
-        self.controlnet = ControlNetModel.from_pretrained(pose_model_path, torch_dtype=torch.float16)
 
-        self.segmentation_pipeline = pipeline(
-            Tasks.image_segmentation,
-            'damo/cv_resnet101_image-multiple-human-parsing',
-            model_revision='v1.0.1')
-
-        self.image_face_fusion = pipeline('face_fusion_torch',
-                                     model='damo/cv_unet_face_fusion_torch', model_revision='v1.0.3')
-
-        model_dir = snapshot_download(
-            'damo/face_chain_control_model', revision='v1.0.1')
-        self.openpose = OpenposeDetector.from_pretrained(
-            os.path.join(model_dir, 'model_controlnet/ControlNet')).to('cuda')
-
-        self.face_quality_func = pipeline(
-            Tasks.face_quality_assessment,
-            'damo/cv_manual_face-quality-assessment_fqa',
-            model_revision='v2.0')
-
-        model_dir = snapshot_download(
-            'ly261666/cv_wanx_style_model', revision='v1.0.2')
-        
-        fr_weight_path = snapshot_download('yucheng1996/FaceChain-FACT', revision='v1.0.0')
-        fr_weight_path = os.path.join(fr_weight_path, 'ms1mv2_model_TransFace_S.pt')
-        
-        fact_model_path = snapshot_download('yucheng1996/FaceChain-FACT', revision='v1.0.0')
-        self.face_adapter_path_maj = os.path.join(fact_model_path, 'adapter_maj_mask_large_new_reg001_faceshuffle_00290001.ckpt')
-        self.face_adapter_path_film = os.path.join(fact_model_path, 'adapter_film_mask_large_new_reg001_faceshuffle_00290001.ckpt')
-        
-        self.face_extracter_maj = Face_Extracter_v1(fr_weight_path=fr_weight_path, fc_weight_path=self.face_adapter_path_maj)
-        self.face_extracter_film = Face_Extracter_v1(fr_weight_path=fr_weight_path, fc_weight_path=self.face_adapter_path_film)
-        
-        self.face_detection = pipeline(task=Tasks.face_detection, model='damo/cv_resnet50_face-detection_retinaface')
-        self.skin_retouching = pipeline(
-            'skin-retouching-torch',
-            model='damo/cv_unet_skin_retouching_torch',
-            model_revision='v1.0.1')
-        self.fair_face_attribute_func = pipeline(Tasks.face_attribute_recognition,
-            snapshot_download('damo/cv_resnet34_face-attribute-recognition_fairface', revision='v2.0.2'))
-        
-        base_model_path_maj = snapshot_download('YorickHe/majicmixRealistic_v6', revision='v1.0.0')
-        base_model_path_maj = os.path.join(base_model_path_maj, 'realistic')
-        
-        base_model_path_film = snapshot_download('ly261666/cv_portrait_model', revision='v2.0')
-        base_model_path_film = os.path.join(base_model_path_film, 'film/film')
-        
-        self.pipe_maj = StableDiffusionControlNetPipeline.from_pretrained(
-                base_model_path_maj,
-                safety_checker=None,
-                controlnet=self.controlnet,
-                torch_dtype=dtype)
-        self.pipe_maj.scheduler = PNDMScheduler.from_config(
-                self.pipe_maj.scheduler.config)
-        
-        self.pipe_film = StableDiffusionControlNetPipeline.from_pretrained(
-                base_model_path_film,
-                safety_checker=None,
-                controlnet=self.controlnet,
-                torch_dtype=dtype)
-        self.pipe_film.scheduler = PNDMScheduler.from_config(
-                self.pipe_film.scheduler.config)
-        
+        self.segmentation_pipeline = segmentation_pipeline
+        self.image_face_fusion = image_face_fusion
+        self.openpose = openpose        
+        self.face_detection = face_detection
+        self.skin_retouching = skin_retouching
+        self.fair_face_attribute_func = fair_face_attribute_func        
+        self.pipe = pipe_pose
+        self.face_adapter = face_adapter        
         self.cfg_scale = 7.0
-        
-        self.face_adapter_maj = FaceAdapter_v1(self.pipe_maj, self.face_detection, self.segmentation_pipeline, self.face_extracter_maj, self.face_adapter_path_maj, 'cuda', True)
-        self.face_adapter_maj.set_scale(0.5)
-        self.face_adapter_maj.delayed_face_condition = 0.0
-        self.face_adapter_maj.pipe.to('cpu')
-        
-        self.face_adapter_film = FaceAdapter_v1(self.pipe_film, self.face_detection, self.segmentation_pipeline, self.face_extracter_film, self.face_adapter_path_film, 'cuda', True)
-        self.face_adapter_film.set_scale(0.5)
-        self.face_adapter_film.delayed_face_condition = 0.0
-        self.face_adapter_film.pipe.to('cpu')
         
         self.use_main_model = True
         self.use_post_process = False
@@ -379,7 +317,8 @@ class GenPortrait:
                  neg_prompt='', 
                  input_img_path=None, 
                  pose_image=None, 
-                 multiplier_style=0):
+                 multiplier_style=0,
+                 scale=0.5):
         
         self.use_face_swap = (use_face_swap > 0)
         st = time.time()
@@ -406,52 +345,46 @@ class GenPortrait:
             self.pos_prompt = pos_prompt
             self.neg_prompt = neg_prompt
             
-            attribute_result = self.fair_face_attribute_func(input_img)
-            score_gender = np.array(attribute_result['scores'][0])
-            score_age = np.array(attribute_result['scores'][1])
-            gender = np.argmax(score_gender)
-            age = np.argmax(score_age)
-            if age < 2:
-                if gender == 0:
-                    attr_idx = 0
+            if scale > 0:
+                attribute_result = self.fair_face_attribute_func(input_img)
+                score_gender = np.array(attribute_result['scores'][0])
+                score_age = np.array(attribute_result['scores'][1])
+                gender = np.argmax(score_gender)
+                age = np.argmax(score_age)
+                if age < 2:
+                    if gender == 0:
+                        attr_idx = 0
+                    else:
+                        attr_idx = 1
+                elif age > 4:
+                    if gender == 0:
+                        attr_idx = 4
+                    else:
+                        attr_idx = 5
                 else:
-                    attr_idx = 1
-            elif age > 4:
-                if gender == 0:
-                    attr_idx = 4
-                else:
-                    attr_idx = 5
-            else:
-                if gender == 0:
-                    attr_idx = 2
-                else:
-                    attr_idx = 3
-            use_age_prompt = True
-            if attr_idx == 3 or attr_idx == 5:
-                use_age_prompt = False
+                    if gender == 0:
+                        attr_idx = 2
+                    else:
+                        attr_idx = 3
+                use_age_prompt = True
+                if attr_idx == 3 or attr_idx == 5:
+                    use_age_prompt = False
 
-            age_prompts = ['20-year-old, ', '25-year-old, ', '35-year-old, ']
+                age_prompts = ['20-year-old, ', '25-year-old, ', '35-year-old, ']
 
-            if age > 1 and age < 5 and use_age_prompt:
-                self.pos_prompt = age_prompts[age - 2] + self.pos_prompt
-            
-            trigger_styles = [
-                'a boy, children, ', 'a girl, children, ',
-                'a handsome man, ', 'a beautiful woman, ',
-                'a mature man, ', 'a mature woman, '
-            ]
-            trigger_style = trigger_styles[attr_idx]
-            if attr_idx == 2 or attr_idx == 4:
-                self.neg_prompt += ', children'
-            
-            self.pos_prompt = trigger_style + self.pos_prompt
-        
-        if base_model_idx == 0:
-            self.pipe = self.pipe_film
-            self.face_adapter = self.face_adapter_film
-        else:
-            self.pipe = self.pipe_maj
-            self.face_adapter = self.face_adapter_maj
+                if age > 1 and age < 5 and use_age_prompt:
+                    self.pos_prompt = age_prompts[age - 2] + self.pos_prompt
+
+                trigger_styles = [
+                    'a boy, children, ', 'a girl, children, ',
+                    'a handsome man, ', 'a beautiful woman, ',
+                    'a mature man, ', 'a mature woman, '
+                ]
+                trigger_style = trigger_styles[attr_idx]
+                if attr_idx == 2 or attr_idx == 4:
+                    self.neg_prompt += ', children'
+
+                self.pos_prompt = trigger_style + self.pos_prompt
         
         if style_model_path is None:
             model_dir = snapshot_download(
@@ -459,8 +392,6 @@ class GenPortrait:
             style_model_path = os.path.join(
                 model_dir, 'zjz_mj_jiyi_small_addtxt_fromleo.safetensors')
                 
-        # main_model_inference PIL
-        self.pipe.to('cuda')
         
         self.pipe = merge_lora(
             self.pipe,
@@ -483,10 +414,12 @@ class GenPortrait:
             segmentation_pipeline=self.segmentation_pipeline,
             image_face_fusion=self.image_face_fusion,
             openpose=self.openpose,
-            controlnet=self.controlnet,
+            controlnet=self.pipe.controlnet,
             depth_estimator=None,
-            pipe=self.face_adapter,
-            cfg_scale=self.cfg_scale)
+            pipe=self.pipe,
+            face_adapter=self.face_adapter,
+            cfg_scale=self.cfg_scale,
+            scale=scale)
         mt = time.time()
         
         self.pipe = restore_lora(
@@ -495,8 +428,6 @@ class GenPortrait:
             multiplier_style,
             device='cuda',
             from_safetensor=True)
-        
-        self.pipe.to('cpu')
 
         # select_high_quality_face PIL
         selected_face = input_img
@@ -505,6 +436,7 @@ class GenPortrait:
                                     selected_face, self.image_face_fusion)
         # stylization
         final_gen_results = stylization_fn(self.use_stylization, swap_results)
+        torch.cuda.empty_cache()
 
         return final_gen_results
 

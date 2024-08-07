@@ -260,7 +260,7 @@ class Identity(nn.Module):
         
 class FaceAdapter_v1:
     
-    def __init__(self, sd_pipe, face_detection, segmentation_pipeline, face_extracter, ckpt, device, cfg_face=False):
+    def __init__(self, face_detection, segmentation_pipeline, face_extracter, ckpt, device, cfg_face=False):
         
         self.device = device
         self.ckpt = ckpt
@@ -272,17 +272,17 @@ class FaceAdapter_v1:
         self.face_detection = face_detection
         self.segmentation_pipeline = segmentation_pipeline
         
-        self.pipe = sd_pipe.to(self.device)
+        # self.pipe = sd_pipe.to(self.device)
         self.scale = 1.0
         self.delayed_face_condition = 0.0
         self.cfg_face = cfg_face
         
-        self.set_adapter()        
-        self.load_adapter()
+        # self.set_adapter()        
+        # self.load_adapter()
         
         
-    def set_adapter(self):
-        unet = self.pipe.unet
+    def set_adapter(self, sd_pipe):
+        unet = sd_pipe.unet
         
         layer_norms = {}
         for i in range(3):
@@ -319,46 +319,48 @@ class FaceAdapter_v1:
                 attn_procs[name] = FaceAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim,
                 scale=1.0, ln=layer_norms[name]).to(self.device, dtype=torch.float16)
         unet.set_attn_processor(attn_procs)
-        if hasattr(self.pipe, "controlnet"):
-            if isinstance(self.pipe.controlnet, MultiControlNetModel):
-                for controlnet in self.pipe.controlnet.nets:
+        if hasattr(sd_pipe, "controlnet"):
+            if isinstance(sd_pipe.controlnet, MultiControlNetModel):
+                for controlnet in sd_pipe.controlnet.nets:
                     controlnet.set_attn_processor(CNAttnProcessor())
             else:
-                self.pipe.controlnet.set_attn_processor(CNAttnProcessor())
+                sd_pipe.controlnet.set_attn_processor(CNAttnProcessor())
         
-    def load_adapter(self):
+    def load_adapter(self, sd_pipe):
         state_dict = torch.load(self.ckpt, map_location="cpu")
         # crossattn_layers = torch.nn.ModuleList(self.pipe.unet.attn_processors.values())
         new_state_dict = {}
         for k in state_dict.keys():
             if 'processor' in k:
                 new_state_dict[k] = state_dict[k]
-        self.pipe.unet.load_state_dict(new_state_dict, strict=False)
+        sd_pipe.unet.load_state_dict(new_state_dict, strict=False)
         
     
-    def set_scale(self, scale):
+    def set_scale(self, scale, sd_pipe):
         self.scale = scale
-        for attn_processor in self.pipe.unet.attn_processors.values():
+        for attn_processor in sd_pipe.unet.attn_processors.values():
             if isinstance(attn_processor, FaceAttnProcessor):
                 attn_processor.scale = scale
     
-    def set_num_ims(self, num_ims):
-        for attn_processor in self.pipe.unet.attn_processors.values():
+    def set_num_ims(self, num_ims, sd_pipe):
+        for attn_processor in sd_pipe.unet.attn_processors.values():
             if isinstance(attn_processor, FaceAttnProcessor):
                 attn_processor.num_ims = num_ims
-        if hasattr(self.pipe, "controlnet"):
-            if isinstance(self.pipe.controlnet, MultiControlNetModel):
-                for controlnet in self.pipe.controlnet.nets:
+        if hasattr(sd_pipe, "controlnet"):
+            if isinstance(sd_pipe.controlnet, MultiControlNetModel):
+                for controlnet in sd_pipe.controlnet.nets:
                     for attn_processor in controlnet.attn_processors.values():
                         if isinstance(attn_processor, CNAttnProcessor):
                             attn_processor.num_ims = num_ims
             else:
-                for attn_processor in self.pipe.controlnet.attn_processors.values():
+                for attn_processor in sd_pipe.controlnet.attn_processors.values():
                     if isinstance(attn_processor, CNAttnProcessor):
                         attn_processor.num_ims = num_ims
         
     def generate(
         self,
+        sd_pipe,
+        scale,
         face_image=None,
         prompt=None,
         negative_prompt=None,
@@ -392,7 +394,7 @@ class FaceAdapter_v1:
             
         num_ims = len(face_image)
         
-        self.set_num_ims(num_ims)
+        self.set_num_ims(num_ims, sd_pipe)
         
         resize_images = []
         for face_image_ori in face_image:
@@ -415,7 +417,7 @@ class FaceAdapter_v1:
         
 
         with torch.inference_mode():
-            prompt_embeds = self.pipe._encode_prompt(
+            prompt_embeds = sd_pipe._encode_prompt(
                 prompt, device=self.device, num_images_per_prompt=num_samples, do_classifier_free_guidance=True, negative_prompt=negative_prompt)
             negative_prompt_embeds_, prompt_embeds_ = prompt_embeds.chunk(2)
             prompt_embeds = torch.cat([prompt_embeds_, image_prompt_embeds], dim=1)
@@ -426,9 +428,8 @@ class FaceAdapter_v1:
             
         generator = torch.Generator(self.device).manual_seed(seed) if seed is not None else None
         if delayed_face_condition > 0:
-            scale = self.scale
-            self.set_scale(0.0)
-            latents = self.pipe(
+            self.set_scale(0.0, sd_pipe)
+            latents = sd_pipe(
                 prompt_embeds=prompt_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
                 guidance_scale=guidance_scale,
@@ -437,8 +438,8 @@ class FaceAdapter_v1:
                 end_time=delayed_face_condition,
                 **kwargs,
             )
-            self.set_scale(scale)
-            images = self.pipe(
+            self.set_scale(scale, sd_pipe)
+            images = sd_pipe(
                 prompt_embeds=prompt_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
                 guidance_scale=guidance_scale,
@@ -449,7 +450,8 @@ class FaceAdapter_v1:
                 **kwargs,
             ).images
         else:
-            images = self.pipe(
+            self.set_scale(scale, sd_pipe)
+            images = sd_pipe(
                 prompt_embeds=prompt_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
                 guidance_scale=guidance_scale,

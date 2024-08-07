@@ -13,6 +13,7 @@ from glob import glob
 import platform
 from PIL import Image
 from importlib.util import find_spec
+from facechain.init_models import init_models
 from facechain.inference_fact import GenPortrait
 from facechain.inference_inpaint_fact import GenPortrait_inpaint
 from facechain.utils import snapshot_download, check_ffmpeg, project_dir, join_worker_data_dir
@@ -77,16 +78,20 @@ def update_prompt(style_model, style_choice, uuid):
         style = matched[0]
         pos_prompt = generate_pos_prompt(style['name'], style['add_prompt_style'])
         multiplier_style = style['multiplier_style']
-        multiplier_human = style['multiplier_human']
     else:
         f = open(f'{project_dir}/workspace/{uuid}/style_lora/{style_model}/add_prompt_style.txt', 'r')
         add_prompt_style = f.read()
         f.close()
         pos_prompt = pos_prompt_with_style.format(add_prompt_style)
         multiplier_style = 0.8
+    if style_model == '基础模型文生图(Text-to-image on base model)':
+        visible = False
+    else:
+        visible = True
         
     return gr.Textbox.update(value=pos_prompt), \
-           gr.Slider.update(value=multiplier_style)
+           gr.Slider.update(value=multiplier_style), \
+           gr.Gallery.update(visible=visible)
 
 
 def update_pose_model(pose_image, pose_model):
@@ -150,6 +155,12 @@ def launch_pipeline(uuid,
             raise ValueError(f'styles not found: {style_model}')
         matched = matched[0]
         style_model = matched['name']
+    
+    if style_model == '基础模型文生图(Text-to-image on base model)':
+        scale = 0.0
+        use_face_swap = 0
+    else:
+        scale = 0.5
 
     if lora_choice == 'preset':
         if style_choice == 1:
@@ -175,7 +186,12 @@ def launch_pipeline(uuid,
     num_images = min(6, num_images)
     print('base model index: ', base_model_index)
     
-    outputs = gen_portrait(use_face_swap, num_images, base_model_index, style_model_path, pos_prompt, neg_prompt, user_images[0]['name'], pose_image, multiplier_style)
+    try:
+        impath = user_images[0]['name']
+    except Exception as e:
+        impath = f'{project_dir}/style_image/Cartoon.jpg'
+    
+    outputs = gen_portrait(use_face_swap, num_images, base_model_index, style_model_path, pos_prompt, neg_prompt, impath, pose_image, multiplier_style, scale)
 
     outputs_RGB = []
     for out_tmp in outputs:
@@ -435,7 +451,7 @@ def inference_input():
         lora_file.upload(fn=upload_lora_file, inputs=[uuid, lora_file], outputs=[lora_choice], queue=False)
         lora_file.clear(fn=clear_lora_file, inputs=[uuid, lora_file], outputs=[lora_choice], queue=False)
         
-        style_model.change(update_prompt, [style_model, style_choice, uuid], [pos_prompt, multiplier_style], queue=False)
+        style_model.change(update_prompt, [style_model, style_choice, uuid], [pos_prompt, multiplier_style, user_images], queue=False)
         
         display_button.click(fn=launch_pipeline,
                              inputs=[uuid, style_choice, pos_prompt, neg_prompt, user_images, num_images, style_model, lora_choice, multiplier_style,
@@ -548,7 +564,18 @@ def train_input():
 
 styles = []
 style_list = []
-base_models_reverse = [base_models[1], base_models[0]]
+base_models_reverse = [base_models[1]]
+data = {}
+data['name'] = '基础模型文生图(Text-to-image on base model)'
+data['base_model_index'] = 1
+data['model_id'] = None
+data['multiplier_style'] = 0
+data['multiplier_human'] = 0
+data['add_prompt_style'] = ''
+data['img'] = './style_image/black.jpg'
+style_list.append(data['name'])
+styles.append(data)
+
 for base_model in base_models_reverse:
     folder_path = f"{os.path.dirname(os.path.abspath(__file__))}/styles/{base_model['name']}"
     files = os.listdir(folder_path)
@@ -571,8 +598,9 @@ for style in styles:
     if style['model_id'] is not None:
         model_dir = snapshot_download(style['model_id'], revision=style['revision'])
 
-gen_portrait = GenPortrait()
-gen_portrait_inpaint = GenPortrait_inpaint()
+pipe_pose, pipe_all, face_adapter, openpose, segmentation_pipeline, image_face_fusion, face_detection, skin_retouching, fair_face_attribute_func = init_models()
+gen_portrait = GenPortrait(segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, face_adapter)
+gen_portrait_inpaint = GenPortrait_inpaint(segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, pipe_all, face_adapter)
 tag_model = init_tag()
 
 with open(

@@ -214,6 +214,8 @@ def img2img_multicontrol(img,
                          control_image,
                          controlnet_conditioning_scale,
                          pipe,
+                         face_adapter,
+                         scale,
                          mask,
                          pos_prompt,
                          neg_prompt,
@@ -224,7 +226,9 @@ def img2img_multicontrol(img,
     image_human = []
     for i in range(num):
         image_human.append(
-            pipe.generate(
+            face_adapter.generate(
+                sd_pipe=pipe,
+                scale=scale,
                 image=img,
                 face_image=face_image,
                 mask_image=image_mask,
@@ -283,6 +287,9 @@ def main_diffusion_inference_inpaint(num_gen_images,
                                      det_pipeline=None,
                                      pipe_pose=None,
                                      pipe_all=None,
+                                     face_adapter=None,
+                                     pose_scale=0.5,
+                                     inpaint_scale=0.5,
                                      face_quality_func=None):
 
     dtype = torch.float16
@@ -307,7 +314,9 @@ def main_diffusion_inference_inpaint(num_gen_images,
 
     image_faces = []
     for i in range(num_gen_images):
-        image_face = pipe_pose.generate(
+        image_face = face_adapter.generate(
+            sd_pipe=pipe_pose,
+            scale=pose_scale,
             prompt=add_prompt_style + pos_prompt,
             image=openpose_image,
             face_image=input_img,
@@ -392,6 +401,8 @@ def main_diffusion_inference_inpaint(num_gen_images,
                 input_img,
                 read_control, [1.0, 0.2],
                 pipe_all,
+                face_adapter,
+                inpaint_scale,
                 inpaint_mask,
                 add_prompt_style + pos_prompt,
                 neg_prompt,
@@ -402,6 +413,8 @@ def main_diffusion_inference_inpaint(num_gen_images,
                 input_img,
                 read_control, [1.0, 0.2],
                 pipe_all,
+                face_adapter,
+                inpaint_scale,
                 np.zeros_like(inpaint_mask),
                 add_prompt_style + pos_prompt,
                 neg_prompt,
@@ -441,6 +454,8 @@ def main_diffusion_inference_inpaint(num_gen_images,
             input_img,
             read_control, [0.8, 0.8],
             pipe_all,
+            face_adapter,
+            inpaint_scale,
             inpaint_mask,
             add_prompt_style + pos_prompt,
             neg_prompt,
@@ -451,6 +466,8 @@ def main_diffusion_inference_inpaint(num_gen_images,
             input_img,
             read_control, [0.8, 0.8],
             pipe_all,
+            face_adapter,
+            inpaint_scale,
             np.zeros_like(inpaint_mask),
             add_prompt_style + pos_prompt,
             neg_prompt,
@@ -490,6 +507,9 @@ def main_model_inference(num_gen_images,
                          det_pipeline=None,
                          pipe_pose=None,
                          pipe_all=None,
+                         face_adapter=None,
+                         pose_scale=0.5,
+                         inpaint_scale=0.5,
                          face_quality_func=None):
     # inpaint_image = compress_image(inpaint_image, 1024 * 1024)
     if use_main_model:
@@ -509,6 +529,9 @@ def main_model_inference(num_gen_images,
             det_pipeline=det_pipeline,
             pipe_pose=pipe_pose,
             pipe_all=pipe_all,
+            face_adapter=face_adapter,
+            pose_scale=pose_scale,
+            inpaint_scale=inpaint_scale,
             face_quality_func=face_quality_func)
 
 
@@ -621,91 +644,23 @@ def postprocess_inpaint_img(img2img_res, output_size=(768, 1024)):
 
 class GenPortrait_inpaint:
 
-    def __init__(self):
-        cfg_face = True
-        
-        fact_model_path = snapshot_download('yucheng1996/FaceChain-FACT', revision='v1.0.0')
-        adapter_path = os.path.join(fact_model_path, 'adapter_maj_mask_large_new_reg001_faceshuffle_00290001.ckpt')
-
-        self.segmentation_pipeline = pipeline(
-            Tasks.image_segmentation,
-            'damo/cv_resnet101_image-multiple-human-parsing',
-            model_revision='v1.0.1')
-        self.image_face_fusion = pipeline('face_fusion_torch',
-                                     model='damo/cv_unet_face_fusion_torch', model_revision='v1.0.3')
-
-        model_dir = snapshot_download(
-            'damo/face_chain_control_model', revision='v1.0.1')
-        self.openpose = OpenposeDetector.from_pretrained(
-            os.path.join(model_dir, 'model_controlnet/ControlNet')).to('cuda')
-        self.depth_estimator = tpipeline(
-            'depth-estimation',
-            os.path.join(model_dir, 'model_controlnet/dpt-large'))
-
-        self.face_quality_func = pipeline(
-            Tasks.face_quality_assessment,
-            'damo/cv_manual_face-quality-assessment_fqa',
-            model_revision='v2.0')
-        self.face_detection = pipeline(
-            task=Tasks.face_detection,
-            model='damo/cv_ddsar_face-detection_iclr23-damofd',
-            model_revision='v1.1')
-
+    def __init__(self, segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, pipe_all, face_adapter):
         dtype = torch.float16
-        model_dir1 = snapshot_download(
-            'ly261666/cv_wanx_style_model', revision='v1.0.3')
-        self.controlnet = [
-            ControlNetModel.from_pretrained(
-                os.path.join(model_dir,
-                             'model_controlnet/control_v11p_sd15_openpose'),
-                torch_dtype=dtype),
-            ControlNetModel.from_pretrained(
-                os.path.join(model_dir1, 'contronet-canny'), torch_dtype=dtype)
-        ]
 
-        model_dir = snapshot_download(
-            'ly261666/cv_wanx_style_model', revision='v1.0.2')
+        self.segmentation_pipeline = segmentation_pipeline
+        self.image_face_fusion = image_face_fusion
+        self.openpose = openpose        
+        self.face_detection = face_detection
+        self.skin_retouching = skin_retouching
+        self.fair_face_attribute_func = fair_face_attribute_func        
+        self.pipe_pose = pipe_pose
+        self.pipe_all = pipe_all
+        self.face_adapter = face_adapter
+        
+        self.pose_scale = 0.5
+        self.inpaint_scale = 0.55
+        
 
-        self.face_adapter_path = adapter_path
-        self.cfg_face = cfg_face
-        
-        fr_weight_path = snapshot_download('yucheng1996/FaceChain-FACT', revision='v1.0.0')
-        fr_weight_path = os.path.join(fr_weight_path, 'ms1mv2_model_TransFace_S.pt')
-        
-        self.face_extracter = Face_Extracter_v1(fr_weight_path=fr_weight_path, fc_weight_path=self.face_adapter_path)
-        self.face_detection0 = pipeline(task=Tasks.face_detection, model='damo/cv_resnet50_face-detection_retinaface')
-        self.skin_retouching = pipeline(
-            'skin-retouching-torch',
-            model=snapshot_download('damo/cv_unet_skin_retouching_torch', revision='v1.0.1.1'))
-        self.fair_face_attribute_func = pipeline(Tasks.face_attribute_recognition,
-            snapshot_download('damo/cv_resnet34_face-attribute-recognition_fairface', revision='v2.0.2'))
-        
-        base_model_path = snapshot_download('YorickHe/majicmixRealistic_v6', revision='v1.0.0')
-        base_model_path = os.path.join(base_model_path, 'realistic')
-        
-        pipe_pose = StableDiffusionControlNetPipeline.from_pretrained(
-            base_model_path,
-            safety_checker=None,
-            controlnet=self.controlnet[0],
-            torch_dtype=torch.float16)
-        pipe_all = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-            base_model_path,
-            safety_checker=None,
-            controlnet=self.controlnet,
-            torch_dtype=torch.float16)
-        pipe_pose.scheduler = PNDMScheduler.from_config(
-                pipe_pose.scheduler.config)
-        pipe_all.scheduler = PNDMScheduler.from_config(
-                pipe_all.scheduler.config)
-        
-        face_adapter_path = self.face_adapter_path
-        self.face_adapter_pose = FaceAdapter_v1(pipe_pose, self.face_detection0, self.segmentation_pipeline, self.face_extracter, face_adapter_path, 'cuda', self.cfg_face) 
-        self.face_adapter_all = FaceAdapter_v1(pipe_all, self.face_detection0, self.segmentation_pipeline, self.face_extracter, face_adapter_path, 'cuda', self.cfg_face) 
-        self.face_adapter_pose.set_scale(0.5)
-        self.face_adapter_all.set_scale(0.55)
-        
-        self.face_adapter_pose.pipe.to('cpu')
-        self.face_adapter_all.pipe.to('cpu')
                    
 
     def __call__(self,
@@ -837,9 +792,6 @@ class GenPortrait_inpaint:
                 self.neg_prompt += ', children'
             
             self.pos_prompt = trigger_style + self.pos_prompt
-            
-            self.face_adapter_pose.pipe.to('cuda')
-            self.face_adapter_all.pipe.to('cuda')
 
             gen_results, is_old = main_model_inference(
                 num_gen_images,
@@ -853,14 +805,15 @@ class GenPortrait_inpaint:
                 segmentation_pipeline=self.segmentation_pipeline,
                 image_face_fusion=self.image_face_fusion,
                 openpose=self.openpose,
-                controlnet=self.controlnet,
+                controlnet=self.pipe_pose.controlnet,
                 det_pipeline=self.face_detection,
-                pipe_pose=self.face_adapter_pose,
-                pipe_all=self.face_adapter_all,
-                face_quality_func=self.face_quality_func)
+                pipe_pose=self.pipe_pose,
+                pipe_all=self.pipe_all,
+                face_adapter=self.face_adapter,
+                pose_scale=self.pose_scale,
+                inpaint_scale=self.inpaint_scale,
+                face_quality_func=None)
             mt = time.time()
-            self.face_adapter_pose.pipe.to('cpu')
-            self.face_adapter_all.pipe.to('cpu')
 
             # select_high_quality_face PIL
             selected_face = input_img
