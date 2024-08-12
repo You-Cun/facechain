@@ -202,6 +202,36 @@ def launch_pipeline(uuid,
     else:
         yield ["生成失败, 请重试(Generation failed, please retry)!", outputs_RGB]
 
+def launch_pipeline_t2i(uuid,
+                    pos_prompt,
+                    neg_prompt=None,
+                    num_images=1,
+                    pose_image=None
+                    ):
+    
+    if not uuid:
+        if os.getenv("MODELSCOPE_ENVIRONMENT") == 'studio':
+            raise gr.Error("请登陆后使用! (Please login first)")
+        else:
+            uuid = 'qw'
+    
+    before_queue_size = 0
+    before_done_count = inference_done_count
+
+    num_images = min(6, num_images)
+    
+    impath = f'{project_dir}/style_image/Cartoon.jpg'
+    
+    outputs = gen_portrait(0, num_images, 1, None, pos_prompt, neg_prompt, impath, pose_image, 0, 0)
+
+    outputs_RGB = []
+    for out_tmp in outputs:
+        outputs_RGB.append(cv2.cvtColor(out_tmp, cv2.COLOR_BGR2RGB))
+    
+    if len(outputs) > 0:
+        yield ["生成完毕(Generation done)!", outputs_RGB]
+    else:
+        yield ["生成失败, 请重试(Generation failed, please retry)!", outputs_RGB]
 
 def launch_pipeline_inpaint(uuid,
                             user_images,
@@ -355,7 +385,7 @@ def inference_input():
         with gr.Row():
             with gr.Column():
                 with gr.Box():
-                    style_choice = gr.Radio(label="风格模型来源(Whether enhancing face similarity)", choices=["预设风格(Preset styles)", "用户训练风格(User-trained styles)"], type="index", value=None)
+                    style_choice = gr.Radio(label="风格模型来源(Whether enhancing face similarity)", choices=["预设风格(Preset styles)", "用户训练风格(User-trained styles)"], type="index", value="预设风格(Preset styles)", visible=False)
                     style_model = gr.Text(label='请选择一种风格(Select a style from the pics below):', interactive=False)
                     trained_styles = gr.Radio(label='用户训练风格列表(User-trained style list)', choices=[], value=None, type="value", visible=False)
                     
@@ -389,18 +419,18 @@ def inference_input():
 
                 with gr.Accordion("高级选项(Advanced Options)", open=False):
                     # upload one lora file and show the name or path of the file
-                    with gr.Accordion("上传LoRA文件(Upload LoRA file)", open=False):
-                        with gr.Row():
-                            lora_choice = gr.Dropdown(choices=["preset"], type="value", value="preset", label="LoRA文件(LoRA file)", visible=True)
-                            update_button = gr.Button('刷新风格LoRA列表并切换为预设风格(Refresh style LoRAs and switch to preset styles)')
+                    # with gr.Accordion("上传LoRA文件(Upload LoRA file)", open=False):
+                    with gr.Row():
+                        lora_choice = gr.Dropdown(choices=["preset"], type="value", value="preset", label="LoRA文件(LoRA file)", visible=False)
+                        update_button = gr.Button('刷新风格LoRA列表并切换为预设风格(Refresh style LoRAs and switch to preset styles)', visible=False)
                             
-                        lora_file = gr.File(
+                    lora_file = gr.File(
                             value=None,
                             label="上传LoRA文件(Upload LoRA file)",
                             type="file",
                             file_types=[".safetensors"],
                             file_count="single",
-                            visible=True,
+                            visible=False,
                         )
                         
                     pos_prompt = gr.Textbox(label="提示语(Prompt)", lines=3,
@@ -462,6 +492,53 @@ def inference_input():
 
     return demo
 
+def inference_input_t2i():
+    with gr.Blocks() as demo:
+        uuid = gr.Text(label="modelscope_uuid", visible=False)
+        
+        with gr.Row():
+            with gr.Column():
+                pos_prompt = gr.Textbox(label="提示语(Prompt)", lines=3,
+                                            value=generate_pos_prompt(None, ''),
+                                            interactive=True)
+                neg_prompt = gr.Textbox(label="负向提示语(Negative Prompt)", lines=3,
+                                            value="",
+                                            interactive=True)
+                if neg_prompt.value == '' :
+                    neg_prompt.value = neg
+                    
+
+                with gr.Accordion("高级选项(Advanced Options)", open=False):                   
+                    with gr.Accordion("姿态控制(Pose control)", open=True):
+                        with gr.Row():
+                            pose_image = gr.Image(source='upload', type='filepath', label='姿态图片(Pose image)', height=250)
+                            pose_res_image = gr.Image(source='upload', interactive=False, label='姿态结果(Pose result)', visible=False, height=250)
+                        gr.Examples(pose_examples['man'], inputs=[pose_image], label='男性姿态示例')
+                        gr.Examples(pose_examples['woman'], inputs=[pose_image], label='女性姿态示例')
+
+                with gr.Box():
+                    num_images = gr.Number(
+                        label='生成图片数量(Number of photos)', value=1, precision=1, minimum=1, maximum=6)
+                    gr.Markdown('''
+                    注意:
+                    - 最多支持生成6张图片!(You may generate a maximum of 6 photos at one time!)
+                        ''')
+
+        with gr.Row(elem_id="container_row"):
+            display_button = gr.Button('开始生成(Start!)', variant='primary')
+
+        with gr.Box():
+            infer_progress = gr.Textbox(label="生成进度(Progress)", value="当前无生成任务(No task)", interactive=False)
+        with gr.Box():
+            gr.Markdown('生成结果(Result)')
+            output_images = gr.Gallery(label='Output', show_label=False).style(columns=3, rows=2, height=600,
+                                                                               object_fit="contain")
+        
+        display_button.click(fn=launch_pipeline_t2i,
+                             inputs=[uuid, pos_prompt, neg_prompt, num_images, pose_image],
+                             outputs=[infer_progress, output_images])
+
+    return demo
 
 def inference_inpaint():
     preset_template = glob(os.path.join(f'{project_dir}/inpaint_template/*.jpg'))
@@ -565,16 +642,16 @@ def train_input():
 styles = []
 style_list = []
 base_models_reverse = [base_models[1]]
-data = {}
-data['name'] = '基础模型文生图(Text-to-image on base model)'
-data['base_model_index'] = 1
-data['model_id'] = None
-data['multiplier_style'] = 0
-data['multiplier_human'] = 0
-data['add_prompt_style'] = ''
-data['img'] = './style_image/black.jpg'
-style_list.append(data['name'])
-styles.append(data)
+# data = {}
+# data['name'] = '基础模型文生图(Text-to-image on base model)'
+# data['base_model_index'] = 1
+# data['model_id'] = None
+# data['multiplier_style'] = 0
+# data['multiplier_human'] = 0
+# data['add_prompt_style'] = ''
+# data['img'] = './style_image/black.jpg'
+# style_list.append(data['name'])
+# styles.append(data)
 
 for base_model in base_models_reverse:
     folder_path = f"{os.path.dirname(os.path.abspath(__file__))}/styles/{base_model['name']}"
@@ -601,7 +678,7 @@ for style in styles:
 pipe_pose, pipe_all, face_adapter, openpose, segmentation_pipeline, image_face_fusion, face_detection, skin_retouching, fair_face_attribute_func = init_models()
 gen_portrait = GenPortrait(segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, face_adapter)
 gen_portrait_inpaint = GenPortrait_inpaint(segmentation_pipeline, image_face_fusion, openpose, face_detection, skin_retouching, fair_face_attribute_func, pipe_pose, pipe_all, face_adapter)
-tag_model = init_tag()
+# tag_model = init_tag()
 
 with open(
         os.path.join(os.path.dirname(__file__), 'main.css'), "r",
@@ -616,12 +693,14 @@ with gr.Blocks(css=MAIN_CSS_CODE, theme=gr.themes.Soft()) as demo:
         gr.Markdown("# <center> \N{fire} FaceChain-FACT Portrait Generation ([Github star it here](https://github.com/modelscope/facechain/tree/main) \N{whale},   [API](https://help.aliyun.com/zh/dashscope/developer-reference/facechain-quick-start) \N{whale})</center>")
     gr.Markdown("##### <center> 本项目仅供学习交流，请勿将模型及其制作内容用于非法活动或违反他人隐私的场景。(This project is intended solely for the purpose of technological discussion, and should not be used for illegal activities and violating privacy of individuals.)</center>")
     with gr.Tabs():
+        with gr.TabItem('\N{party popper}基础模型文生图(Text-to-image Generation on Base Model)'):
+            inference_input_t2i()
         with gr.TabItem('\N{party popper}免训练无限风格形象写真(Infinite Style Portrait)'):
             inference_input()
         with gr.TabItem('\N{party popper}免训练固定模板形象写真(Fixed Templates Portrait)'):
             inference_inpaint()
-        with gr.TabItem('\N{party popper}自定义风格模型训练(Style Model Training)'):
-            train_input()
+        # with gr.TabItem('\N{party popper}自定义风格模型训练(Style Model Training)'):
+        #     train_input()
 
 if __name__ == "__main__":
     demo.queue(status_update_rate=1).launch(share=False)
